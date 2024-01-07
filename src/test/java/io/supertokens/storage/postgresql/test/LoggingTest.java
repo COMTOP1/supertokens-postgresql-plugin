@@ -284,6 +284,7 @@ public class LoggingTest {
                 new EmailPasswordConfig(true),
                 new ThirdPartyConfig(true, null),
                 new PasswordlessConfig(true),
+                null, null,
                 config
         ), false);
 

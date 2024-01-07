@@ -7,6 +7,9 @@ to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+- Replace `TotpNotEnabledError` with `UnknownUserIdTotpError`.
+- Support for MFA recipe
+
 ## [5.0.6] - 2023-12-05
 
 - Validates db config types in `canBeUsed` function
@@ -129,7 +132,6 @@ CREATE INDEX IF NOT EXISTS app_id_to_user_id_primary_user_id_index ON app_id_to_
     ALTER TABLE emailpassword_pswd_reset_tokens ADD COLUMN email VARCHAR(256);
    ```
 4. Run the new instance(s) of the core (version 7.0.0)
-
 
 ## [4.0.2]
 
