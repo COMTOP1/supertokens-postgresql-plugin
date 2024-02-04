@@ -17,21 +17,26 @@
 package io.supertokens.storage.postgresql.queries;
 
 import io.supertokens.pluginInterface.RowMapper;
+import io.supertokens.pluginInterface.authRecipe.AuthRecipeUserInfo;
+import io.supertokens.pluginInterface.authRecipe.LoginMethod;
+import io.supertokens.pluginInterface.emailpassword.exceptions.DuplicateEmailException;
+import io.supertokens.pluginInterface.emailpassword.exceptions.UnknownUserIdException;
 import io.supertokens.pluginInterface.exceptions.StorageQueryException;
 import io.supertokens.pluginInterface.exceptions.StorageTransactionLogicException;
 import io.supertokens.pluginInterface.multitenancy.AppIdentifier;
 import io.supertokens.pluginInterface.multitenancy.TenantIdentifier;
+import io.supertokens.pluginInterface.thirdparty.exception.DuplicateThirdPartyUserException;
 import io.supertokens.pluginInterface.thirdparty.UserInfo;
 import io.supertokens.storage.postgresql.ConnectionPool;
 import io.supertokens.storage.postgresql.Start;
 import io.supertokens.storage.postgresql.config.Config;
 import io.supertokens.storage.postgresql.utils.Utils;
-import org.jetbrains.annotations.NotNull;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.*;
+import java.util.stream.Collectors;
 
 import static io.supertokens.pluginInterface.RECIPE_ID.THIRD_PARTY;
 import static io.supertokens.storage.postgresql.QueryExecutorTemplate.execute;
@@ -53,7 +58,8 @@ public class ThirdPartyQueries {
                 + "time_joined BIGINT NOT NULL,"
                 + "CONSTRAINT " + Utils.getConstraintName(schema, thirdPartyUsersTable, "user_id", "fkey")
                 + " FOREIGN KEY(app_id, user_id)"
-                + " REFERENCES " + Config.getConfig(start).getAppIdToUserIdTable() +  " (app_id, user_id) ON DELETE CASCADE,"
+                + " REFERENCES " + Config.getConfig(start).getAppIdToUserIdTable() +
+                " (app_id, user_id) ON DELETE CASCADE,"
                 + "CONSTRAINT " + Utils.getConstraintName(schema, thirdPartyUsersTable, null, "pkey")
                 + " PRIMARY KEY (app_id, user_id)"
                 + ");";
@@ -89,6 +95,56 @@ public class ThirdPartyQueries {
                 + " REFERENCES " + Config.getConfig(start).getUsersTable() + "(app_id, tenant_id, user_id) ON DELETE CASCADE"
                 + ");";
         // @formatter:on
+    }
+
+    public static void signUp(Start start, io.supertokens.pluginInterface.thirdparty.UserInfo userInfo)
+            throws StorageQueryException, StorageTransactionLogicException {
+        start.startTransaction(con -> {
+            Connection sqlCon = (Connection) con.getConnection();
+            try {
+                {
+                    String QUERY = "INSERT INTO " + getConfig(start).getUsersTable()
+                            + "(user_id, recipe_id, time_joined)" + " VALUES(?, ?, ?)";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, userInfo.id);
+                        pst.setString(2, THIRD_PARTY.toString());
+                        pst.setLong(3, userInfo.timeJoined);
+                    });
+                }
+
+                { // thirdparty_users
+                    String QUERY = "INSERT INTO " + getConfig(start).getThirdPartyUsersTable()
+                            + "(app_id, third_party_id, third_party_user_id, user_id, email, time_joined)"
+                            + " VALUES(?, ?, ?, ?, ?, ?)";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, tenantIdentifier.getAppId());
+                        pst.setString(2, thirdParty.id);
+                        pst.setString(3, thirdParty.userId);
+                        pst.setString(4, id);
+                        pst.setString(5, email);
+                        pst.setLong(6, timeJoined);
+                    });
+                }
+
+                { // thirdparty_user_to_tenant
+                    String QUERY = "INSERT INTO " + getConfig(start).getThirdPartyUserToTenantTable()
+                            + "(app_id, tenant_id, user_id, third_party_id, third_party_user_id)"
+                            + " VALUES(?, ?, ?, ?, ?)";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, tenantIdentifier.getAppId());
+                        pst.setString(2, tenantIdentifier.getTenantId());
+                        pst.setString(3, id);
+                        pst.setString(4, thirdParty.id);
+                        pst.setString(5, thirdParty.userId);
+                    });
+                }
+
+                sqlCon.commit();
+            } catch (SQLException throwables) {
+                throw new StorageTransactionLogicException(throwables);
+            }
+            return null;
+        });
     }
 
     public static UserInfo signUp(Start start, TenantIdentifier tenantIdentifier, String id, String email, UserInfo.ThirdParty thirdParty, long timeJoined)
@@ -155,6 +211,136 @@ public class ThirdPartyQueries {
         });
     }
 
+    public static AuthRecipeUserInfo signUp(Start start, TenantIdentifier tenantIdentifier, String id, String email,
+                                            LoginMethod.ThirdParty thirdParty, long timeJoined)
+            throws StorageQueryException, StorageTransactionLogicException {
+        return start.startTransaction(con -> {
+            Connection sqlCon = (Connection) con.getConnection();
+            try {
+                { // app_id_to_user_id
+                    String QUERY = "INSERT INTO " + getConfig(start).getAppIdToUserIdTable()
+                            + "(app_id, user_id, primary_or_recipe_user_id, recipe_id)" + " VALUES(?, ?, ?, ?)";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, tenantIdentifier.getAppId());
+                        pst.setString(2, id);
+                        pst.setString(3, id);
+                        pst.setString(4, THIRD_PARTY.toString());
+                    });
+                }
+
+                { // all_auth_recipe_users
+                    String QUERY = "INSERT INTO " + getConfig(start).getUsersTable()
+                            + "(app_id, tenant_id, user_id, primary_or_recipe_user_id, recipe_id, time_joined, primary_or_recipe_user_time_joined)" +
+                            " VALUES(?, ?, ?, ?, ?, ?, ?)";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, tenantIdentifier.getAppId());
+                        pst.setString(2, tenantIdentifier.getTenantId());
+                        pst.setString(3, id);
+                        pst.setString(4, id);
+                        pst.setString(5, THIRD_PARTY.toString());
+                        pst.setLong(6, timeJoined);
+                        pst.setLong(7, timeJoined);
+                    });
+                }
+
+                { // thirdparty_users
+                    String QUERY = "INSERT INTO " + getConfig(start).getThirdPartyUsersTable()
+                            + "(app_id, third_party_id, third_party_user_id, user_id, email, time_joined)"
+                            + " VALUES(?, ?, ?, ?, ?, ?)";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, tenantIdentifier.getAppId());
+                        pst.setString(2, thirdParty.id);
+                        pst.setString(3, thirdParty.userId);
+                        pst.setString(4, id);
+                        pst.setString(5, email);
+                        pst.setLong(6, timeJoined);
+                    });
+                }
+
+                { // thirdparty_user_to_tenant
+                    String QUERY = "INSERT INTO " + getConfig(start).getThirdPartyUserToTenantTable()
+                            + "(app_id, tenant_id, user_id, third_party_id, third_party_user_id)"
+                            + " VALUES(?, ?, ?, ?, ?)";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, tenantIdentifier.getAppId());
+                        pst.setString(2, tenantIdentifier.getTenantId());
+                        pst.setString(3, id);
+                        pst.setString(4, thirdParty.id);
+                        pst.setString(5, thirdParty.userId);
+                    });
+                }
+
+                UserInfoPartial userInfo = new UserInfoPartial(id, email, thirdParty, timeJoined);
+                fillUserInfoWithTenantIds_transaction(start, sqlCon, tenantIdentifier.toAppIdentifier(), userInfo);
+                fillUserInfoWithVerified_transaction(start, sqlCon, tenantIdentifier.toAppIdentifier(), userInfo);
+                sqlCon.commit();
+                return AuthRecipeUserInfo.create(id, false, userInfo.toLoginMethod());
+
+            } catch (SQLException throwables) {
+                throw new StorageTransactionLogicException(throwables);
+            }
+        });
+    }
+
+    public static void deleteUser_Transaction(Connection sqlCon, Start start, AppIdentifier appIdentifier,
+                                              String userId, boolean deleteUserIdMappingToo)
+            throws StorageQueryException, SQLException {
+        if (deleteUserIdMappingToo) {
+            String QUERY = "DELETE FROM " + getConfig(start).getAppIdToUserIdTable()
+                    + " WHERE app_id = ? AND user_id = ?";
+
+            update(sqlCon, QUERY, pst -> {
+                pst.setString(1, appIdentifier.getAppId());
+                pst.setString(2, userId);
+            });
+        } else {
+            {
+                String QUERY = "DELETE FROM " + getConfig(start).getUsersTable()
+                        + " WHERE app_id = ? AND user_id = ?";
+                update(sqlCon, QUERY, pst -> {
+                    pst.setString(1, appIdentifier.getAppId());
+                    pst.setString(2, userId);
+                });
+            }
+
+            {
+                String QUERY = "DELETE FROM " + getConfig(start).getThirdPartyUsersTable()
+                        + " WHERE app_id = ? AND user_id = ?";
+                update(sqlCon, QUERY, pst -> {
+                    pst.setString(1, appIdentifier.getAppId());
+                    pst.setString(2, userId);
+                });
+            }
+        }
+    }
+
+    public static void deleteUser(Start start, String userId)
+            throws StorageQueryException, StorageTransactionLogicException {
+        start.startTransaction(con -> {
+            Connection sqlCon = (Connection) con.getConnection();
+            try {
+                {
+                    String QUERY = "DELETE FROM " + getConfig(start).getUsersTable()
+                            + " WHERE user_id = ? AND recipe_id = ?";
+                    update(sqlCon, QUERY, pst -> {
+                        pst.setString(1, userId);
+                        pst.setString(2, THIRD_PARTY.toString());
+                    });
+                }
+
+                {
+                    String QUERY = "DELETE FROM " + getConfig(start).getThirdPartyUsersTable() + " WHERE user_id = ? ";
+                    update(sqlCon, QUERY, pst -> pst.setString(1, userId));
+                }
+
+                sqlCon.commit();
+            } catch (SQLException throwables) {
+                throw new StorageTransactionLogicException(throwables);
+            }
+            return null;
+        });
+    }
+
     public static void deleteUser(Start start, AppIdentifier appIdentifier, String userId)
             throws StorageQueryException, StorageTransactionLogicException {
         start.startTransaction(con -> {
@@ -178,6 +364,78 @@ public class ThirdPartyQueries {
         });
     }
 
+    public static void deleteUser_Transaction(Connection sqlCon, Start start, AppIdentifier appIdentifier,
+                                              String userId, boolean deleteUserIdMappingToo)
+            throws StorageQueryException, SQLException {
+        if (deleteUserIdMappingToo) {
+            String QUERY = "DELETE FROM " + getConfig(start).getAppIdToUserIdTable()
+                    + " WHERE app_id = ? AND user_id = ?";
+
+            update(sqlCon, QUERY, pst -> {
+                pst.setString(1, appIdentifier.getAppId());
+                pst.setString(2, userId);
+            });
+        } else {
+            {
+                String QUERY = "DELETE FROM " + getConfig(start).getUsersTable()
+                        + " WHERE app_id = ? AND user_id = ?";
+                update(sqlCon, QUERY, pst -> {
+                    pst.setString(1, appIdentifier.getAppId());
+                    pst.setString(2, userId);
+                });
+            }
+
+            {
+                String QUERY = "DELETE FROM " + getConfig(start).getThirdPartyUsersTable()
+                        + " WHERE app_id = ? AND user_id = ?";
+                update(sqlCon, QUERY, pst -> {
+                    pst.setString(1, appIdentifier.getAppId());
+                    pst.setString(2, userId);
+                });
+            }
+        }
+    }
+
+    public static List<String> lockEmail_Transaction(Start start, Connection con,
+                                                     AppIdentifier appIdentifier,
+                                                     String email) throws SQLException, StorageQueryException {
+        String QUERY = "SELECT tp.user_id as user_id "
+                + "FROM " + getConfig(start).getThirdPartyUsersTable() + " AS tp" +
+                " WHERE tp.app_id = ? AND tp.email = ? FOR UPDATE";
+
+        return execute(con, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, email);
+        }, result -> {
+            List<String> finalResult = new ArrayList<>();
+            while (result.next()) {
+                finalResult.add(result.getString("user_id"));
+            }
+            return finalResult;
+        });
+    }
+
+    public static List<String> lockThirdPartyInfoAndTenant_Transaction(Start start, Connection con,
+                                                                       AppIdentifier appIdentifier,
+                                                                       String thirdPartyId, String thirdPartyUserId)
+            throws SQLException, StorageQueryException {
+        String QUERY = "SELECT user_id " +
+                " FROM " + getConfig(start).getThirdPartyUsersTable() +
+                " WHERE app_id = ? AND third_party_id = ? AND third_party_user_id = ? FOR UPDATE";
+
+        return execute(con, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, thirdPartyId);
+            pst.setString(3, thirdPartyUserId);
+        }, result -> {
+            List<String> finalResult = new ArrayList<>();
+            while (result.next()) {
+                finalResult.add(result.getString("user_id"));
+            }
+            return finalResult;
+        });
+    }
+
     public static UserInfo getThirdPartyUserInfoUsingId(Start start, AppIdentifier appIdentifier, String userId)
             throws SQLException, StorageQueryException {
         String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined FROM "
@@ -195,29 +453,21 @@ public class ThirdPartyQueries {
         return userInfoWithTenantIds(start, userInfo);
     }
 
-    public static List<UserInfo> getUsersInfoUsingIdList(Start start, List<String> ids)
+    public static List<LoginMethod> getUsersInfoUsingIdList(Start start, Set<String> ids,
+                                                            AppIdentifier appIdentifier)
             throws SQLException, StorageQueryException {
         if (ids.size() > 0) {
-            // No need to filter based on tenantId because the id list is already filtered for a tenant
-            StringBuilder QUERY = new StringBuilder(
-                    "SELECT user_id, third_party_id, third_party_user_id, email, time_joined "
-                            + "FROM " + getConfig(start).getThirdPartyUsersTable());
-            QUERY.append(" WHERE user_id IN (");
-            for (int i = 0; i < ids.size(); i++) {
+            String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined "
+                    + "FROM " + getConfig(start).getThirdPartyUsersTable() + " WHERE user_id IN (" +
+                    Utils.generateCommaSeperatedQuestionMarks(ids.size()) + ") AND app_id = ?";
 
-                QUERY.append("?");
-                if (i != ids.size() - 1) {
-                    // not the last element
-                    QUERY.append(",");
+            List<UserInfoPartial> userInfos = execute(start, QUERY, pst -> {
+                int index = 1;
+                for (String id : ids) {
+                    pst.setString(index, id);
+                    index++;
                 }
-            }
-            QUERY.append(")");
-
-            List<UserInfoPartial> userInfos = execute(start, QUERY.toString(), pst -> {
-                for (int i = 0; i < ids.size(); i++) {
-                    // i+1 cause this starts with 1 and not 0
-                    pst.setString(i + 1, ids.get(i));
-                }
+                pst.setString(index, appIdentifier.getAppId());
             }, result -> {
                 List<UserInfoPartial> finalResult = new ArrayList<>();
                 while (result.next()) {
@@ -225,9 +475,214 @@ public class ThirdPartyQueries {
                 }
                 return finalResult;
             });
-            return userInfoWithTenantIds(start, userInfos);
+
+            try (Connection con = ConnectionPool.getConnection(start)) {
+                fillUserInfoWithTenantIds_transaction(start, con, appIdentifier, userInfos);
+                fillUserInfoWithVerified_transaction(start, con, appIdentifier, userInfos);
+            }
+            return userInfos.stream().map(UserInfoPartial::toLoginMethod).collect(Collectors.toList());
         }
         return Collections.emptyList();
+    }
+
+    public static List<LoginMethod> getUsersInfoUsingIdList_Transaction(Start start, Connection con, Set<String> ids,
+                                                                        AppIdentifier appIdentifier)
+            throws SQLException, StorageQueryException {
+        if (ids.size() > 0) {
+            String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined "
+                    + "FROM " + getConfig(start).getThirdPartyUsersTable() + " WHERE user_id IN (" +
+                    Utils.generateCommaSeperatedQuestionMarks(ids.size()) + ") AND app_id = ?";
+
+            List<UserInfoPartial> userInfos = execute(con, QUERY, pst -> {
+                int index = 1;
+                for (String id : ids) {
+                    pst.setString(index, id);
+                    index++;
+                }
+                pst.setString(index, appIdentifier.getAppId());
+            }, result -> {
+                List<UserInfoPartial> finalResult = new ArrayList<>();
+                while (result.next()) {
+                    finalResult.add(UserInfoRowMapper.getInstance().mapOrThrow(result));
+                }
+                return finalResult;
+            });
+
+            fillUserInfoWithTenantIds_transaction(start, con, appIdentifier, userInfos);
+            fillUserInfoWithVerified_transaction(start, con, appIdentifier, userInfos);
+            return userInfos.stream().map(UserInfoPartial::toLoginMethod).collect(Collectors.toList());
+        }
+        return Collections.emptyList();
+    }
+
+
+    public static List<String> listUserIdsByThirdPartyInfo(Start start, AppIdentifier appIdentifier,
+                                                           String thirdPartyId, String thirdPartyUserId)
+            throws SQLException, StorageQueryException {
+
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUsersTable() + " AS tp" +
+                " JOIN " + getConfig(start).getUsersTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp.third_party_id = ? AND tp.third_party_user_id = ?";
+
+        return execute(start, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, thirdPartyId);
+            pst.setString(3, thirdPartyUserId);
+        }, result -> {
+            List<String> userIds = new ArrayList<>();
+            while (result.next()) {
+                userIds.add(result.getString("user_id"));
+            }
+            return userIds;
+        });
+    }
+
+    public static List<String> listUserIdsByThirdPartyInfo_Transaction(Start start, Connection con, AppIdentifier appIdentifier,
+                                                                       String thirdPartyId, String thirdPartyUserId)
+            throws SQLException, StorageQueryException {
+
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUsersTable() + " AS tp" +
+                " JOIN " + getConfig(start).getUsersTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp.third_party_id = ? AND tp.third_party_user_id = ?";
+
+        return execute(con, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, thirdPartyId);
+            pst.setString(3, thirdPartyUserId);
+        }, result -> {
+            List<String> userIds = new ArrayList<>();
+            while (result.next()) {
+                userIds.add(result.getString("user_id"));
+            }
+            return userIds;
+        });
+    }
+
+    public static String getUserIdByThirdPartyInfo(Start start, TenantIdentifier tenantIdentifier,
+                                                   String thirdPartyId, String thirdPartyUserId)
+            throws SQLException, StorageQueryException {
+
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUserToTenantTable() + " AS tp" +
+                " JOIN " + getConfig(start).getUsersTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp.tenant_id = ? AND tp.third_party_id = ? AND tp.third_party_user_id = ?";
+
+        return execute(start, QUERY, pst -> {
+            pst.setString(1, tenantIdentifier.getAppId());
+            pst.setString(2, tenantIdentifier.getTenantId());
+            pst.setString(3, thirdPartyId);
+            pst.setString(4, thirdPartyUserId);
+        }, result -> {
+            if (result.next()) {
+                return result.getString("user_id");
+            }
+            return null;
+        });
+    }
+
+    public static List<LoginMethod> getUsersInfoUsingIdList_Transaction(Start start, Connection con, Set<String> ids,
+                                                                        AppIdentifier appIdentifier)
+            throws SQLException, StorageQueryException {
+        if (ids.size() > 0) {
+            String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined "
+                    + "FROM " + getConfig(start).getThirdPartyUsersTable() + " WHERE user_id IN (" +
+                    Utils.generateCommaSeperatedQuestionMarks(ids.size()) + ") AND app_id = ?";
+
+            List<UserInfoPartial> userInfos = execute(con, QUERY, pst -> {
+                int index = 1;
+                for (String id : ids) {
+                    pst.setString(index, id);
+                    index++;
+                }
+                pst.setString(index, appIdentifier.getAppId());
+            }, result -> {
+                List<UserInfoPartial> finalResult = new ArrayList<>();
+                while (result.next()) {
+                    finalResult.add(UserInfoRowMapper.getInstance().mapOrThrow(result));
+                }
+                return finalResult;
+            });
+
+            fillUserInfoWithTenantIds_transaction(start, con, appIdentifier, userInfos);
+            fillUserInfoWithVerified_transaction(start, con, appIdentifier, userInfos);
+            return userInfos.stream().map(UserInfoPartial::toLoginMethod).collect(Collectors.toList());
+        }
+        return Collections.emptyList();
+    }
+
+
+    public static List<String> listUserIdsByThirdPartyInfo(Start start, AppIdentifier appIdentifier,
+                                                           String thirdPartyId, String thirdPartyUserId)
+            throws SQLException, StorageQueryException {
+
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUsersTable() + " AS tp" +
+                " JOIN " + getConfig(start).getUsersTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp.third_party_id = ? AND tp.third_party_user_id = ?";
+
+        return execute(start, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, thirdPartyId);
+            pst.setString(3, thirdPartyUserId);
+        }, result -> {
+            List<String> userIds = new ArrayList<>();
+            while (result.next()) {
+                userIds.add(result.getString("user_id"));
+            }
+            return userIds;
+        });
+    }
+
+    public static List<String> listUserIdsByThirdPartyInfo_Transaction(Start start, Connection con, AppIdentifier appIdentifier,
+                                                                       String thirdPartyId, String thirdPartyUserId)
+            throws SQLException, StorageQueryException {
+
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUsersTable() + " AS tp" +
+                " JOIN " + getConfig(start).getUsersTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp.third_party_id = ? AND tp.third_party_user_id = ?";
+
+        return execute(con, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, thirdPartyId);
+            pst.setString(3, thirdPartyUserId);
+        }, result -> {
+            List<String> userIds = new ArrayList<>();
+            while (result.next()) {
+                userIds.add(result.getString("user_id"));
+            }
+            return userIds;
+        });
+    }
+
+    public static String getUserIdByThirdPartyInfo(Start start, TenantIdentifier tenantIdentifier,
+                                                   String thirdPartyId, String thirdPartyUserId)
+            throws SQLException, StorageQueryException {
+
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUserToTenantTable() + " AS tp" +
+                " JOIN " + getConfig(start).getUsersTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp.tenant_id = ? AND tp.third_party_id = ? AND tp.third_party_user_id = ?";
+
+        return execute(start, QUERY, pst -> {
+            pst.setString(1, tenantIdentifier.getAppId());
+            pst.setString(2, tenantIdentifier.getTenantId());
+            pst.setString(3, thirdPartyId);
+            pst.setString(4, thirdPartyUserId);
+        }, result -> {
+            if (result.next()) {
+                return result.getString("user_id");
+            }
+            return null;
+        });
     }
 
     public static UserInfo getThirdPartyUserInfoUsingId(Start start, TenantIdentifier tenantIdentifier,
@@ -292,11 +747,29 @@ public class ThirdPartyQueries {
         return userInfoWithTenantIds_transaction(start, con, userInfo);
     }
 
-    private static UserInfoPartial getUserInfoUsingUserId(Start start, Connection con,
-                                                          AppIdentifier appIdentifier, String userId)
+    public static UserInfo getUserInfoUsingId_Transaction(Start start, Connection con, String thirdPartyId,
+            String thirdPartyUserId) throws SQLException, StorageQueryException {
+
+        String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined FROM "
+                + getConfig(start).getThirdPartyUsersTable()
+                + " WHERE third_party_id = ? AND third_party_user_id = ? FOR UPDATE";
+        return execute(con, QUERY, pst -> {
+            pst.setString(1, thirdPartyId);
+            pst.setString(2, thirdPartyUserId);
+        }, result -> {
+            if (result.next()) {
+                return UserInfoRowMapper.getInstance().mapOrThrow(result);
+            }
+            return null;
+        });
+    }
+
+    private static UserInfoPartial getUserInfoUsingUserId_Transaction(Start start, Connection con,
+                                                                      AppIdentifier appIdentifier, String userId)
             throws SQLException, StorageQueryException {
 
-        // we don't need a FOR UPDATE here because this is already part of a transaction, and locked on app_id_to_user_id table
+        // we don't need a LOCK here because this is already part of a transaction, and locked on app_id_to_user_id
+        // table
         String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined FROM "
                 + getConfig(start).getThirdPartyUsersTable()
                 + " WHERE app_id = ?  AND user_id = ?";
@@ -308,6 +781,57 @@ public class ThirdPartyQueries {
                 return UserInfoRowMapper.getInstance().mapOrThrow(result);
             }
             return null;
+        });
+    }
+
+    @Deprecated
+    public static UserInfo[] getThirdPartyUsers(Start start, @NotNull Integer limit, @NotNull String timeJoinedOrder)
+            throws SQLException, StorageQueryException {
+        String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined FROM "
+                + getConfig(start).getThirdPartyUsersTable() + " ORDER BY time_joined " + timeJoinedOrder
+                + ", user_id DESC LIMIT ?";
+        return execute(start, QUERY, pst -> pst.setInt(1, limit), result -> {
+            List<UserInfo> temp = new ArrayList<>();
+            while (result.next()) {
+                temp.add(UserInfoRowMapper.getInstance().mapOrThrow(result));
+            }
+            return temp.toArray(UserInfo[]::new);
+        });
+    }
+
+    @Deprecated
+    public static UserInfo[] getThirdPartyUsers(Start start, @NotNull String userId, @NotNull Long timeJoined,
+            @NotNull Integer limit, @NotNull String timeJoinedOrder) throws SQLException, StorageQueryException {
+        String timeJoinedOrderSymbol = timeJoinedOrder.equals("ASC") ? ">" : "<";
+        String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined FROM "
+                + Config.getConfig(start).getThirdPartyUsersTable() + " WHERE time_joined " + timeJoinedOrderSymbol
+                + " ? OR (time_joined = ? AND user_id <= ?) ORDER BY time_joined " + timeJoinedOrder
+                + ", user_id DESC LIMIT ?";
+
+        return execute(start, QUERY, pst -> {
+            pst.setLong(1, timeJoined);
+            pst.setLong(2, timeJoined);
+            pst.setString(3, userId);
+            pst.setInt(4, limit);
+        }, result -> {
+            List<UserInfo> users = new ArrayList<>();
+
+            while (result.next()) {
+                users.add(UserInfoRowMapper.getInstance().mapOrThrow(result));
+            }
+
+            return users.toArray(UserInfo[]::new);
+        });
+    }
+
+    @Deprecated
+    public static long getUsersCount(Start start) throws SQLException, StorageQueryException {
+        String QUERY = "SELECT COUNT(*) as total FROM " + getConfig(start).getThirdPartyUsersTable();
+        return execute(start, QUERY, NO_OP_SETTER, result -> {
+            if (result.next()) {
+                return result.getLong("total");
+            }
+            return 0L;
         });
     }
 
@@ -411,6 +935,174 @@ public class ThirdPartyQueries {
         return userInfoWithTenantIds_transaction(start, sqlCon, Arrays.asList(userInfo)).get(0);
     }
 
+    public static List<String> getPrimaryUserIdUsingEmail(Start start,
+                                                          TenantIdentifier tenantIdentifier, String email)
+            throws StorageQueryException, SQLException {
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUsersTable() + " AS tp" +
+                " JOIN " + getConfig(start).getUsersTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " JOIN " + getConfig(start).getThirdPartyUserToTenantTable() + " AS tp_tenants" +
+                " ON tp_tenants.app_id = all_users.app_id AND tp_tenants.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp_tenants.tenant_id = ? AND tp.email = ?";
+
+        return execute(start, QUERY, pst -> {
+            pst.setString(1, tenantIdentifier.getAppId());
+            pst.setString(2, tenantIdentifier.getTenantId());
+            pst.setString(3, email);
+        }, result -> {
+            List<String> finalResult = new ArrayList<>();
+            while (result.next()) {
+                finalResult.add(result.getString("user_id"));
+            }
+            return finalResult;
+        });
+    }
+
+    public static List<String> getPrimaryUserIdUsingEmail_Transaction(Start start, Connection con,
+                                                                      AppIdentifier appIdentifier, String email)
+            throws StorageQueryException, SQLException {
+        String QUERY = "SELECT DISTINCT all_users.primary_or_recipe_user_id AS user_id "
+                + "FROM " + getConfig(start).getThirdPartyUsersTable() + " AS tp" +
+                " JOIN " + getConfig(start).getAppIdToUserIdTable() + " AS all_users" +
+                " ON tp.app_id = all_users.app_id AND tp.user_id = all_users.user_id" +
+                " WHERE tp.app_id = ? AND tp.email = ?";
+
+        return execute(con, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, email);
+        }, result -> {
+            List<String> finalResult = new ArrayList<>();
+            while (result.next()) {
+                finalResult.add(result.getString("user_id"));
+            }
+            return finalResult;
+        });
+    }
+
+    public static boolean addUserIdToTenant_Transaction(Start start, Connection sqlCon,
+                                                        TenantIdentifier tenantIdentifier, String userId)
+            throws SQLException, StorageQueryException, UnknownUserIdException {
+        UserInfoPartial userInfo = ThirdPartyQueries.getUserInfoUsingUserId_Transaction(start, sqlCon,
+                tenantIdentifier.toAppIdentifier(), userId);
+
+        if (userInfo == null) {
+            throw new UnknownUserIdException();
+        }
+
+        GeneralQueries.AccountLinkingInfo accountLinkingInfo = GeneralQueries.getAccountLinkingInfo_Transaction(start, sqlCon, tenantIdentifier.toAppIdentifier(), userId);
+
+        { // all_auth_recipe_users
+            String QUERY = "INSERT INTO " + getConfig(start).getUsersTable()
+                    + "(app_id, tenant_id, user_id, primary_or_recipe_user_id, is_linked_or_is_a_primary_user, recipe_id, time_joined, primary_or_recipe_user_time_joined)"
+                    + " VALUES(?, ?, ?, ?, ?, ?, ?, ?)" + " ON CONFLICT DO NOTHING";
+            update(sqlCon, QUERY, pst -> {
+                pst.setString(1, tenantIdentifier.getAppId());
+                pst.setString(2, tenantIdentifier.getTenantId());
+                pst.setString(3, userInfo.id);
+                pst.setString(4, accountLinkingInfo.primaryUserId);
+                pst.setBoolean(5, accountLinkingInfo.isLinked);
+                pst.setString(6, THIRD_PARTY.toString());
+                pst.setLong(7, userInfo.timeJoined);
+                pst.setLong(8, userInfo.timeJoined);
+            });
+
+            GeneralQueries.updateTimeJoinedForPrimaryUser_Transaction(start, sqlCon, tenantIdentifier.toAppIdentifier(), accountLinkingInfo.primaryUserId);
+        }
+
+        { // thirdparty_user_to_tenant
+            String QUERY = "INSERT INTO " + getConfig(start).getThirdPartyUserToTenantTable()
+                    + "(app_id, tenant_id, user_id, third_party_id, third_party_user_id)"
+                    + " VALUES(?, ?, ?, ?, ?)" + " ON CONFLICT ON CONSTRAINT "
+                    + Utils.getConstraintName(Config.getConfig(start).getTableSchema(), getConfig(start).getThirdPartyUserToTenantTable(), null, "pkey")
+                    + " DO NOTHING";
+            int numRows = update(sqlCon, QUERY, pst -> {
+                pst.setString(1, tenantIdentifier.getAppId());
+                pst.setString(2, tenantIdentifier.getTenantId());
+                pst.setString(3, userInfo.id);
+                pst.setString(4, userInfo.thirdParty.id);
+                pst.setString(5, userInfo.thirdParty.userId);
+            });
+
+            return numRows > 0;
+        }
+    }
+
+    public static boolean removeUserIdFromTenant_Transaction(Start start, Connection sqlCon,
+                                                             TenantIdentifier tenantIdentifier, String userId)
+            throws SQLException, StorageQueryException {
+        { // all_auth_recipe_users
+            String QUERY = "DELETE FROM " + getConfig(start).getUsersTable()
+                    + " WHERE app_id = ? AND tenant_id = ? and user_id = ? and recipe_id = ?";
+            int numRows = update(sqlCon, QUERY, pst -> {
+                pst.setString(1, tenantIdentifier.getAppId());
+                pst.setString(2, tenantIdentifier.getTenantId());
+                pst.setString(3, userId);
+                pst.setString(4, THIRD_PARTY.toString());
+            });
+
+            return numRows > 0;
+        }
+
+        // automatically deleted from thirdparty_user_to_tenant because of foreign key constraint
+    }
+
+    private static UserInfoPartial fillUserInfoWithVerified_transaction(Start start, Connection sqlCon,
+                                                                        AppIdentifier appIdentifier,
+                                                                        UserInfoPartial userInfo)
+            throws SQLException, StorageQueryException {
+        if (userInfo == null) return null;
+        return fillUserInfoWithVerified_transaction(start, sqlCon, appIdentifier, List.of(userInfo)).get(0);
+    }
+
+    private static List<UserInfoPartial> fillUserInfoWithVerified_transaction(Start start, Connection sqlCon,
+                                                                              AppIdentifier appIdentifier,
+                                                                              List<UserInfoPartial> userInfos)
+            throws SQLException, StorageQueryException {
+        List<EmailVerificationQueries.UserIdAndEmail> userIdsAndEmails = new ArrayList<>();
+        for (UserInfoPartial userInfo : userInfos) {
+            userIdsAndEmails.add(new EmailVerificationQueries.UserIdAndEmail(userInfo.id, userInfo.email));
+        }
+        List<String> userIdsThatAreVerified = EmailVerificationQueries.isEmailVerified_transaction(start, sqlCon,
+                appIdentifier,
+                userIdsAndEmails);
+        Set<String> verifiedUserIdsSet = new HashSet<>(userIdsThatAreVerified);
+        for (UserInfoPartial userInfo : userInfos) {
+            if (verifiedUserIdsSet.contains(userInfo.id)) {
+                userInfo.verified = true;
+            } else {
+                userInfo.verified = false;
+            }
+        }
+        return userInfos;
+    }
+
+    private static UserInfoPartial fillUserInfoWithTenantIds_transaction(Start start, Connection sqlCon,
+                                                                         AppIdentifier appIdentifier,
+                                                                         UserInfoPartial userInfo)
+            throws SQLException, StorageQueryException {
+        if (userInfo == null) return null;
+        return fillUserInfoWithTenantIds_transaction(start, sqlCon, appIdentifier, List.of(userInfo)).get(0);
+    }
+
+    private static List<UserInfoPartial> fillUserInfoWithTenantIds_transaction(Start start, Connection sqlCon,
+                                                                               AppIdentifier appIdentifier,
+                                                                               List<UserInfoPartial> userInfos)
+            throws SQLException, StorageQueryException {
+        String[] userIds = new String[userInfos.size()];
+        for (int i = 0; i < userInfos.size(); i++) {
+            userIds[i] = userInfos.get(i).id;
+        }
+
+        Map<String, List<String>> tenantIdsForUserIds = GeneralQueries.getTenantIdsForUserIds_transaction(start, sqlCon,
+                appIdentifier,
+                userIds);
+        for (UserInfoPartial userInfo : userInfos) {
+            userInfo.tenantIds = tenantIdsForUserIds.get(userInfo.id).toArray(new String[0]);
+        }
+        return userInfos;
+    }
+
     private static List<UserInfo> userInfoWithTenantIds_transaction(Start start, Connection sqlCon, List<UserInfoPartial> userInfos)
             throws SQLException, StorageQueryException {
         String[] userIds = new String[userInfos.size()];
@@ -428,17 +1120,43 @@ public class ThirdPartyQueries {
         return result;
     }
 
+    public static UserInfo[] getThirdPartyUsersByEmail(Start start, @NotNull String email)
+            throws SQLException, StorageQueryException {
+        String QUERY = "SELECT user_id, third_party_id, third_party_user_id, email, time_joined FROM "
+                + Config.getConfig(start).getThirdPartyUsersTable() + " WHERE email = ?";
+
+        return execute(start, QUERY, pst -> pst.setString(1, email), result -> {
+            List<UserInfo> users = new ArrayList<>();
+
+            while (result.next()) {
+                users.add(UserInfoRowMapper.getInstance().mapOrThrow(result));
+            }
+
+            return users.toArray(UserInfo[]::new);
+        });
+    }
+
     private static class UserInfoPartial {
         public final String id;
         public final String email;
-        public final UserInfo.ThirdParty thirdParty;
+        public final LoginMethod.ThirdParty thirdParty;
         public final long timeJoined;
+        public String[] tenantIds;
+        public Boolean verified;
+        public Boolean isPrimary;
 
-        public UserInfoPartial(String id, String email, UserInfo.ThirdParty thirdParty, long timeJoined) {
+        public UserInfoPartial(String id, String email, LoginMethod.ThirdParty thirdParty, long timeJoined) {
             this.id = id.trim();
             this.email = email;
             this.thirdParty = thirdParty;
             this.timeJoined = timeJoined;
+        }
+
+        public LoginMethod toLoginMethod() {
+            assert (tenantIds != null);
+            assert (verified != null);
+            return new LoginMethod(id, timeJoined, verified, email,
+                    new LoginMethod.ThirdParty(thirdParty.id, thirdParty.userId), tenantIds);
         }
     }
 
@@ -455,7 +1173,8 @@ public class ThirdPartyQueries {
         @Override
         public UserInfoPartial map(ResultSet result) throws Exception {
             return new UserInfoPartial(result.getString("user_id"), result.getString("email"),
-                    new UserInfo.ThirdParty(result.getString("third_party_id"),
+                    //new UserInfo.ThirdParty(result.getString("third_party_id"),
+                    new LoginMethod.ThirdParty(result.getString("third_party_id"),
                             result.getString("third_party_user_id")),
                     result.getLong("time_joined"));
         }

@@ -25,10 +25,12 @@ import io.supertokens.storage.postgresql.config.Config;
 import io.supertokens.storage.postgresql.utils.Utils;
 
 import javax.annotation.Nullable;
+import java.sql.Connection;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 
 import static io.supertokens.storage.postgresql.QueryExecutorTemplate.execute;
 import static io.supertokens.storage.postgresql.QueryExecutorTemplate.update;
@@ -126,7 +128,7 @@ public class UserIdMappingQueries {
 
     }
 
-    public static HashMap<String, String> getUserIdMappingWithUserIds(Start start, ArrayList<String> userIds)
+    public static HashMap<String, String> getUserIdMappingWithUserIds(Start start, List<String> userIds)
             throws SQLException, StorageQueryException {
 
         if (userIds.size() == 0) {
@@ -145,6 +147,39 @@ public class UserIdMappingQueries {
         }
         QUERY.append(")");
         return execute(start, QUERY.toString(), pst -> {
+            for (int i = 0; i < userIds.size(); i++) {
+                // i+1 cause this starts with 1 and not 0
+                pst.setString(i + 1, userIds.get(i));
+            }
+        }, result -> {
+            HashMap<String, String> userIdMappings = new HashMap<>();
+            while (result.next()) {
+                UserIdMapping temp = UserIdMappingRowMapper.getInstance().mapOrThrow(result);
+                userIdMappings.put(temp.superTokensUserId, temp.externalUserId);
+            }
+            return userIdMappings;
+        });
+    }
+
+    public static HashMap<String, String> getUserIdMappingWithUserIds_Transaction(Start start, Connection sqlCon, List<String> userIds)
+            throws SQLException, StorageQueryException {
+
+        if (userIds.size() == 0) {
+            return new HashMap<>();
+        }
+
+        // No need to filter based on tenantId because the id list is already filtered for a tenant
+        StringBuilder QUERY = new StringBuilder(
+                "SELECT * FROM " + Config.getConfig(start).getUserIdMappingTable() + " WHERE supertokens_user_id IN (");
+        for (int i = 0; i < userIds.size(); i++) {
+            QUERY.append("?");
+            if (i != userIds.size() - 1) {
+                // not the last element
+                QUERY.append(",");
+            }
+        }
+        QUERY.append(")");
+        return execute(sqlCon, QUERY.toString(), pst -> {
             for (int i = 0; i < userIds.size(); i++) {
                 // i+1 cause this starts with 1 and not 0
                 pst.setString(i + 1, userIds.get(i));
@@ -214,6 +249,56 @@ public class UserIdMappingQueries {
         });
 
         return rowUpdated > 0;
+    }
+
+    public static UserIdMapping getuseraIdMappingWithSuperTokensUserId_Transaction(Start start, Connection sqlCon, AppIdentifier appIdentifier, String userId)
+            throws SQLException, StorageQueryException {
+        String QUERY = "SELECT * FROM " + Config.getConfig(start).getUserIdMappingTable()
+                + " WHERE app_id = ? AND supertokens_user_id = ?";
+        return execute(sqlCon, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, userId);
+        }, result -> {
+            if (result.next()) {
+                return UserIdMappingRowMapper.getInstance().mapOrThrow(result);
+            }
+            return null;
+        });
+    }
+
+    public static UserIdMapping getUserIdMappingWithExternalUserId_Transaction(Start start, Connection sqlCon, AppIdentifier appIdentifier, String userId)
+            throws SQLException, StorageQueryException {
+        String QUERY = "SELECT * FROM " + Config.getConfig(start).getUserIdMappingTable()
+                + " WHERE app_id = ? AND external_user_id = ?";
+
+        return execute(sqlCon, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, userId);
+        }, result -> {
+            if (result.next()) {
+                return UserIdMappingRowMapper.getInstance().mapOrThrow(result);
+            }
+            return null;
+        });
+    }
+
+    public static UserIdMapping[] getUserIdMappingWithEitherSuperTokensUserIdOrExternalUserId_Transaction(Start start, Connection sqlCon,
+                                                                                                          AppIdentifier appIdentifier, String userId)
+            throws SQLException, StorageQueryException {
+        String QUERY = "SELECT * FROM " + Config.getConfig(start).getUserIdMappingTable()
+                + " WHERE app_id = ? AND (supertokens_user_id = ? OR external_user_id = ?)";
+
+        return execute(sqlCon, QUERY, pst -> {
+            pst.setString(1, appIdentifier.getAppId());
+            pst.setString(2, userId);
+            pst.setString(3, userId);
+        }, result -> {
+            ArrayList<UserIdMapping> userIdMappingArray = new ArrayList<>();
+            while (result.next()) {
+                userIdMappingArray.add(UserIdMappingRowMapper.getInstance().mapOrThrow(result));
+            }
+            return userIdMappingArray.toArray(UserIdMapping[]::new);
+        });
     }
 
     private static class UserIdMappingRowMapper implements RowMapper<UserIdMapping, ResultSet> {

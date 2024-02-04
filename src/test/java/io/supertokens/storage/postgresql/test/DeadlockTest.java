@@ -18,9 +18,14 @@
 package io.supertokens.storage.postgresql.test;
 
 import io.supertokens.ProcessState;
+import io.supertokens.authRecipe.AuthRecipe;
+import io.supertokens.emailpassword.EmailPassword;
+import io.supertokens.featureflag.EE_FEATURES;
+import io.supertokens.featureflag.FeatureFlagTestContent;
 import io.supertokens.passwordless.Passwordless;
 import io.supertokens.pluginInterface.KeyValueInfo;
 import io.supertokens.pluginInterface.Storage;
+import io.supertokens.pluginInterface.authRecipe.AuthRecipeUserInfo;
 import io.supertokens.pluginInterface.exceptions.StorageQueryException;
 import io.supertokens.pluginInterface.exceptions.StorageTransactionLogicException;
 import io.supertokens.pluginInterface.multitenancy.AppIdentifier;
@@ -46,6 +51,8 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicLongArray;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static io.supertokens.storage.postgresql.QueryExecutorTemplate.update;
@@ -217,16 +224,27 @@ public class DeadlockTest {
         ExecutorService es = Executors.newFixedThreadPool(1000);
 
         AtomicBoolean pass = new AtomicBoolean(true);
+        AtomicLong max_duration = new AtomicLong(0);
+        AtomicLong total_duration = new AtomicLong(0);
+        AtomicLongArray durations = new AtomicLongArray(3000);
 
         for (int i = 0; i < 3000; i++) {
             final int ind = i;
             es.execute(() -> {
                 try {
+                    long startTime = System.currentTimeMillis();
                     Passwordless.CreateCodeResponse resp = Passwordless.createCode(process.getProcess(),
                             "test" + ind + "@example.com", null, null, null);
                     Passwordless.ConsumeCodeResponse resp2 = Passwordless.consumeCode(process.getProcess(),
                             resp.deviceId, resp.deviceIdHash, resp.userInputCode, resp.linkCode);
 
+                    long timeElapsed = System.currentTimeMillis() - startTime;
+                    total_duration.addAndGet(timeElapsed);
+
+                    if (timeElapsed > max_duration.get()) {
+                        max_duration.set(timeElapsed);
+                    }
+                    durations.set(ind, timeElapsed);
                 } catch (Exception e) {
                     if (e.getMessage() != null
                             && e.getMessage().toLowerCase().contains("the transaction might succeed if retried")) {
@@ -237,7 +255,17 @@ public class DeadlockTest {
         }
 
         es.shutdown();
-        es.awaitTermination(2, TimeUnit.MINUTES);
+        es.awaitTermination(5, TimeUnit.MINUTES);
+
+        System.out.println("Max execution time: " + max_duration.get() + "ms");
+        System.out.println("Total execution time: " + total_duration.get() + "ms");
+        System.out.println("Avg execution time: " + (total_duration.get() / 3000) + "ms");
+        System.out.println("Durations: " + durations.toString());
+
+        assertNull(process
+                .checkOrWaitForEventInPlugin(io.supertokens.storage.postgresql.ProcessState.PROCESS_STATE.DEADLOCK_NOT_RESOLVED));
+        assertNotNull(process
+                .checkOrWaitForEventInPlugin(io.supertokens.storage.postgresql.ProcessState.PROCESS_STATE.DEADLOCK_FOUND));
 
         assert (pass.get());
 
@@ -576,6 +604,94 @@ public class DeadlockTest {
         assertNotNull(process.checkOrWaitForEvent(ProcessState.PROCESS_STATE.STOPPED));
     }
 
+    @Test
+    public void testLinkAccountsInParallel() throws Exception {
+        String[] args = {"../"};
+
+        TestingProcessManager.TestingProcess process = TestingProcessManager.start(args, false);
+        FeatureFlagTestContent.getInstance(process.getProcess())
+                .setKeyValue(FeatureFlagTestContent.ENABLED_FEATURES, new EE_FEATURES[]{
+                        EE_FEATURES.ACCOUNT_LINKING, EE_FEATURES.MULTI_TENANCY});
+        process.startProcess();
+        assertNotNull(process.checkOrWaitForEvent(ProcessState.PROCESS_STATE.STARTED));
+
+        ExecutorService es = Executors.newFixedThreadPool(1000);
+
+        AtomicBoolean pass = new AtomicBoolean(true);
+
+        AuthRecipeUserInfo user1 = EmailPassword.signUp(process.getProcess(), "test1@example.com", "password");
+        AuthRecipeUserInfo user2 = EmailPassword.signUp(process.getProcess(), "test2@example.com", "password");
+
+        AuthRecipe.createPrimaryUser(process.getProcess(), user1.getSupertokensUserId());
+
+        for (int i = 0; i < 3000; i++) {
+            es.execute(() -> {
+                try {
+                    AuthRecipe.linkAccounts(process.getProcess(), user2.getSupertokensUserId(), user1.getSupertokensUserId());
+                    AuthRecipe.unlinkAccounts(process.getProcess(), user2.getSupertokensUserId());
+                } catch (Exception e) {
+                    if (e.getMessage().toLowerCase().contains("the transaction might succeed if retried")) {
+                        pass.set(false);
+                    }
+                }
+            });
+        }
+
+        es.shutdown();
+        es.awaitTermination(2, TimeUnit.MINUTES);
+
+        assert (pass.get());
+        assertNull(process
+                .checkOrWaitForEventInPlugin(io.supertokens.storage.postgresql.ProcessState.PROCESS_STATE.DEADLOCK_NOT_RESOLVED));
+        assertNotNull(process
+                .checkOrWaitForEventInPlugin(io.supertokens.storage.postgresql.ProcessState.PROCESS_STATE.DEADLOCK_FOUND));
+
+        process.kill();
+        assertNotNull(process.checkOrWaitForEvent(ProcessState.PROCESS_STATE.STOPPED));
+    }
+
+    @Test
+    public void testCreatePrimaryInParallel() throws Exception {
+        String[] args = {"../"};
+
+        TestingProcessManager.TestingProcess process = TestingProcessManager.start(args, false);
+        FeatureFlagTestContent.getInstance(process.getProcess())
+                .setKeyValue(FeatureFlagTestContent.ENABLED_FEATURES, new EE_FEATURES[]{
+                        EE_FEATURES.ACCOUNT_LINKING, EE_FEATURES.MULTI_TENANCY});
+        process.startProcess();
+        assertNotNull(process.checkOrWaitForEvent(ProcessState.PROCESS_STATE.STARTED));
+
+        ExecutorService es = Executors.newFixedThreadPool(1000);
+
+        AtomicBoolean pass = new AtomicBoolean(true);
+
+        AuthRecipeUserInfo user1 = EmailPassword.signUp(process.getProcess(), "test1@example.com", "password");
+
+        for (int i = 0; i < 3000; i++) {
+            es.execute(() -> {
+                try {
+                    AuthRecipe.createPrimaryUser(process.getProcess(), user1.getSupertokensUserId());
+                    AuthRecipe.unlinkAccounts(process.getProcess(), user1.getSupertokensUserId());
+                } catch (Exception e) {
+                    if (e.getMessage().toLowerCase().contains("the transaction might succeed if retried")) {
+                        pass.set(false);
+                    }
+                }
+            });
+        }
+
+        es.shutdown();
+        es.awaitTermination(2, TimeUnit.MINUTES);
+
+        assert (pass.get());
+        assertNull(process
+                .checkOrWaitForEventInPlugin(io.supertokens.storage.postgresql.ProcessState.PROCESS_STATE.DEADLOCK_NOT_RESOLVED));
+        assertNotNull(process
+                .checkOrWaitForEventInPlugin(io.supertokens.storage.postgresql.ProcessState.PROCESS_STATE.DEADLOCK_FOUND));
+
+        process.kill();
+        assertNotNull(process.checkOrWaitForEvent(ProcessState.PROCESS_STATE.STOPPED));
+    }
 }
 
 /*
